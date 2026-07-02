@@ -1,0 +1,11 @@
+[project]
+name = "cinehue"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pillow>=12.3.0",
+    "scikit-learn>=1.9.0",
+    "tqdm>=4.68.3",
+]
