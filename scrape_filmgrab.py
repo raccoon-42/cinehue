@@ -42,11 +42,32 @@ def get(url):
     return r.stdout
 
 
+def slugify(title):
+    t = re.sub(r"['’]", "", title.lower())  # Schindler's -> schindlers
+    return re.sub(r"[^a-z0-9]+", "-", t).strip("-")
+
+
 def find_post_url(title):
+    """Best-matching post for a title. Search returns any post that merely
+    MENTIONS the title (searching "Stalker" once returned The Green Mile), so
+    prefer an exact slug match, then a slug prefix (year-suffixed posts like
+    solaris-1972), and only then fall back to the first result with a warning."""
     q = urllib.parse.urlencode({"s": title})
     html = get(f"https://film-grab.com/?{q}").decode("utf-8", "replace")
-    m = re.search(r'href="(https://film-grab\.com/\d{4}/\d{2}/\d{2}/[^"]+/)"', html)
-    return m.group(1) if m else None
+    links = re.findall(
+        r'href="(https://film-grab\.com/\d{4}/\d{2}/\d{2}/([^"/]+)/)"', html)
+    if not links:
+        return None
+    want = slugify(title)
+    for url, slug in links:
+        if slug == want:
+            return url
+    for url, slug in links:
+        if slug.startswith(want + "-"):
+            return url
+    tqdm.write(f"[warn] {title}: no slug match, falling back to first result "
+               f"({links[0][1]}) — verify it is the right film")
+    return links[0][0]
 
 
 def find_frames(post_url):

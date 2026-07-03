@@ -138,7 +138,8 @@ def palette_for(px, k, gamma, sal=None, sgamma=1.0):
     centers, weights = centers[order], weights[order]
     cc = np.hypot(centers[:, 1], centers[:, 2])
     entries = [{"hex": hexof(c), "weight": round(float(w), 4),
-                "L": round(float(c[0]), 4), "C": round(float(ci), 4)}
+                "L": round(float(c[0]), 4), "C": round(float(ci), 4),
+                "h": round(float(np.degrees(np.arctan2(c[2], c[1]))) % 360, 1)}
                for c, w, ci in zip(centers, weights, cc)]
     blend = (weights[:, None] * centers).sum(axis=0)
 
@@ -147,7 +148,8 @@ def palette_for(px, k, gamma, sal=None, sgamma=1.0):
     hi = lab[pix_c >= np.percentile(pix_c, 90)]
     ac = dominant(hi, 3) if len(hi) >= 10 else (hi.mean(0) if len(hi) else centers[0])
     accent = {"hex": hexof(ac), "L": round(float(ac[0]), 4),
-              "C": round(float(np.hypot(ac[1], ac[2])), 4)}
+              "C": round(float(np.hypot(ac[1], ac[2])), 4),
+              "h": round(float(np.degrees(np.arctan2(ac[2], ac[1]))) % 360, 1)}
 
     # Subject = dominant colour once pixels are weighted by saliency. DEAD-END
     # (see module docstring): distance-from-mean is symmetric, so dark/large
@@ -167,12 +169,39 @@ def palette_for(px, k, gamma, sal=None, sgamma=1.0):
     return {
         "palette": entries,
         "blend": hexof(blend),
+        "blend_lab": [round(float(v), 4) for v in blend],
         "accent": accent,
         "subject": subject,
         "L_mean": round(float((weights * centers[:, 0]).sum()), 4),
         "C_mean": round(float((weights * cc).sum()), 4),
         "chroma_pct": {"p50": p50, "p95": p95, "p99": p99},
     }
+
+
+SUBJECTS = ROOT / "data" / "subjects.json"  # written by experiment_subject_rembg.py
+
+
+def with_mood(results):
+    """Attach a 'mood' wheel to each film, built from the two IDENTITY signals:
+    accent (environmental, always present) and subject-chroma (costume, when
+    experiment_subject_rembg.py has written subjects.json and found one).
+    Colors sit around the wheel sorted by hue angle, each owning an arc
+    proportional to its chroma — the more saturated signal dominates the wheel.
+    A film with no costume signal is a pure accent circle."""
+    subj = json.loads(SUBJECTS.read_text()) if SUBJECTS.exists() else {}
+    for r in results:
+        cols = [r["accent"]]
+        sc = (subj.get(r["slug"]) or {}).get("chroma")
+        if sc:
+            cols.append(sc)
+        cols.sort(key=lambda c: c["h"])
+        total = sum(c["C"] for c in cols) or 1.0
+        stops, acc = [], 0.0
+        for c in cols:
+            stops.append({"hex": c["hex"], "weight": round(c["C"] / total, 4),
+                          "pos": round((acc + c["C"] / 2) / total, 4)})
+            acc += c["C"]
+        r["mood"] = {"h": r["accent"]["h"], "wheel": stops}
 
 
 def title_map():
@@ -196,9 +225,15 @@ def render_html(results):
             f'width:52px;height:38px;border-radius:6px;outline:2px dashed #999;'
             f'background:{sub["hex"]}"></span>') if sub else ''
         sub_cap = f' · subject {sub["hex"]} (C={sub["C"]})' if sub else ''
+        mood = r["mood"]
+        grad = ", ".join(f'{s["hex"]} {s["pos"] * 100:.1f}%' for s in mood["wheel"])
+        grad += f', {mood["wheel"][0]["hex"]} 100%'  # wrap last hue back to first
         rows.append(
             f'<div style="margin:10px 0;font:13px system-ui">'
             f'<div style="display:flex;align-items:center;gap:12px">'
+            f'<span title="mood wheel h={mood["h"]}" '
+            f'style="display:inline-block;width:44px;height:44px;border-radius:50%;'
+            f'background:conic-gradient(from 0deg, {grad})"></span>'
             f'<span title="blend {r["blend"]}" style="display:inline-block;width:52px;'
             f'height:38px;border-radius:6px;background:{r["blend"]}"></span>'
             f'<span title="accent {r["accent"]["hex"]}" style="display:inline-block;'
@@ -216,8 +251,9 @@ def render_html(results):
         '<body style="background:#111;color:#eee;padding:24px">'
         '<h2 style="font:600 18px system-ui">cinehue — empirical palettes</h2>'
         '<div style="font:12px system-ui;color:#888;margin-bottom:16px">'
-        'swatches: blend (mood) · accent (solid outline) · subject (dashed outline) '
-        '· strip = dominant palette (width = weight)</div>'
+        'swatches: mood wheel (circle — accent + subject-chroma around the wheel, '
+        'arc = chroma, blended) · blend (raw) · accent (solid outline) '
+        '· subject (dashed outline) · strip = dominant palette (width = weight)</div>'
         + "".join(rows) + "</body>")
 
 
@@ -255,7 +291,8 @@ def main():
                    f'accent {r["accent"]["hex"]} (C={r["accent"]["C"]:.3f}) · '
                    f'subject {subtxt}')
 
-    results.sort(key=lambda r: r["L_mean"])  # dark -> light
+    with_mood(results)
+    results.sort(key=lambda r: (r["mood"]["h"], r["L_mean"]))  # around the wheel
     PALETTES.write_text(json.dumps(results, indent=2, ensure_ascii=False))
     render_html(results)
     print(f"[done] {len(results)} films -> {PALETTES.name}, {PREVIEW.name}")
