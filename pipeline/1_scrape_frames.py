@@ -15,9 +15,9 @@ themoviedb.org/settings/api in the TMDB_API_KEY env var; without it the
 fallback is skipped.
 
 Usage:
-    uv run scrape_frames.py "Blue Velvet" "Stalker" "Ran"
-    uv run scrape_frames.py watchlist.txt   # one title per line, # = comment
-    uv run scrape_frames.py                 # ./watchlist.txt if present,
+    uv run pipeline/1_scrape_frames.py "Blue Velvet" "Stalker" "Ran"
+    uv run pipeline/1_scrape_frames.py watchlist.txt   # one title per line, # = comment
+    uv run pipeline/1_scrape_frames.py                 # ./watchlist.txt if present,
                                               # else the default sample list
 """
 import json
@@ -33,7 +33,7 @@ from tqdm import tqdm
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120 Safari/537.36")
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 FRAMES = ROOT / "data" / "frames"
 MANIFEST = ROOT / "data" / "manifest.json"
 MAX_FRAMES = 20          # frames kept per film

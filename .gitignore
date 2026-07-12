@@ -17,3 +17,7 @@ wheels/
 
 # Scraped stills + generated palette outputs (regenerable via the scripts)
 data/
+
+# Personal film lists (watchlist.txt + pipeline/0_letterboxd.py output)
+watchlist.txt
+letterboxd_*.txt

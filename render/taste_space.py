@@ -33,7 +33,7 @@ Reads data/palettes.json, writes data/preview_taste_space.html
 (--film TITLE -> preview_taste_space_film.html, exact match preferred).
 
 Usage:
-    uv run experiment_taste_space.py [--mode atoms|clustered|gradient|sum|
+    uv run render/taste_space.py [--mode atoms|clustered|gradient|sum|
                                       spectrum] [--gamma 0.5] [--soft 1.0]
                                      [--sharp 1.5] [--knee 0.8]
                                      [--bandwidth 10] [--film ran]
@@ -41,14 +41,15 @@ Usage:
 import argparse
 import json
 import math
+import sys
 from pathlib import Path
 
-from experiment_taste_palette import build_measure, film_atoms, \
-    hex_to_oklab, oklab_to_hex
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib.measure import build_measure, film_atoms
+from lib.oklab import hex_to_oklab, oklab_to_hex
+from lib.paths import DATA, PALETTES
 
-ROOT = Path(__file__).resolve().parent
-PALETTES = ROOT / "data" / "palettes.json"
-OUT = ROOT / "data" / "preview_taste_space.html"
+OUT = DATA / "preview_taste_space.html"
 
 SQ = 560              # px per square
 R_EDGE = SQ / 2 - 10

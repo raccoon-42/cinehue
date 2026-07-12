@@ -26,7 +26,7 @@ import json
 import math
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 PALETTES = ROOT / "data" / "palettes.json"
 OUT = ROOT / "data" / "preview_taste_ring.html"
 

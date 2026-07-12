@@ -34,13 +34,14 @@ shows newly computed films). Delete a film's entry to redo it, or pass
 --redo to recompute everything. subjects.json is saved after EVERY film.
 
 Usage:
-    uv run experiment_subject_rembg.py [--redo]
+    uv run pipeline/2_subjects.py [--redo]
 """
 import argparse
 import base64
 import io
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -49,11 +50,11 @@ from PIL import Image
 from sklearn.cluster import KMeans
 from tqdm import tqdm
 
-from extract_palettes import FRAMES, PALETTES, dominant, hexof, srgb_to_oklab, title_map
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib.paths import DATA, FRAMES, PALETTES, SUBJECTS, title_map
+from lib.pixels import dominant, hexof, srgb_to_oklab
 
-ROOT = Path(__file__).resolve().parent
-OUT = ROOT / "data" / "preview_subject.html"
-SUBJECTS = ROOT / "data" / "subjects.json"  # consumed by extract_palettes' mood wheel
+OUT = DATA / "preview_subject.html"
 U2NET_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
 MODEL = Path.home() / ".u2net" / "u2net.onnx"
 THUMB = 320  # u2net's native input side; keep mask and pooled pixels aligned
