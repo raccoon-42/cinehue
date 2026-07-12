@@ -12,5 +12,8 @@ wheels/
 # macOS
 .DS_Store
 
+# Secrets
+.env
+
 # Scraped stills + generated palette outputs (regenerable via the scripts)
 data/

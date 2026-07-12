@@ -29,9 +29,14 @@ film's frames, then:
 Compares against the existing blend + accent and writes data/preview_subject.html
 showing EVERY frame's proposed RoI (background dimmed) for the eyeball check.
 
+Resume: films already present in subjects.json are skipped (the preview only
+shows newly computed films). Delete a film's entry to redo it, or pass
+--redo to recompute everything. subjects.json is saved after EVERY film.
+
 Usage:
-    uv run experiment_subject_rembg.py
+    uv run experiment_subject_rembg.py [--redo]
 """
+import argparse
 import base64
 import io
 import json
@@ -145,6 +150,11 @@ def roi_overlay(im, mask, height=120):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--redo", action="store_true",
+                    help="recompute films already present in subjects.json")
+    args = ap.parse_args()
+
     ensure_model()
     # CoreML dispatches to the Apple GPU/ANE; unsupported ops fall back to CPU.
     sess = ort.InferenceSession(
@@ -156,10 +166,21 @@ def main():
 
     rows = []
     subjects = json.loads(SUBJECTS.read_text()) if SUBJECTS.exists() else {}
-    for d in sorted(p for p in FRAMES.iterdir() if p.is_dir()):
+    skipped = 0
+    dirs = sorted(p for p in FRAMES.iterdir() if p.is_dir())
+    outer = tqdm(dirs, desc="films", unit="film", position=0)
+    for d in outer:
+        if d.name in subjects and not args.redo:
+            skipped += 1
+            continue
         subj_px, bg_px, thumbs, covers, l_sum, l_n = [], [], [], [], 0.0, 0
-        for f in tqdm(sorted(d.glob("*.jpg")), desc=d.name, unit="frame"):
-            im = Image.open(f).convert("RGB")
+        for f in tqdm(sorted(d.glob("*.jpg")), desc=d.name, unit="frame",
+                      position=1, leave=False):
+            try:
+                im = Image.open(f).convert("RGB")
+            except Exception:
+                tqdm.write(f"[bad frame] {d.name}/{f.name}: unreadable, skipped")
+                continue
             im.thumbnail((THUMB, THUMB))
             mask = u2net_mask(im, sess)
             rgb = np.asarray(im, dtype=np.float32) / 255.0
@@ -178,6 +199,7 @@ def main():
         used = len(subj_px)
         if not subj_px:
             tqdm.write(f"[skip] {d.name}: no frame produced a usable mask")
+            outer.refresh()
             continue
         area, chroma = subject_colors(subsample(np.concatenate(subj_px), rng))
         bg = blend_of(srgb_to_oklab(subsample(np.concatenate(bg_px), rng)))
@@ -187,6 +209,7 @@ def main():
             "L": round(float(chroma[0]), 4),
             "C": round(float(np.hypot(chroma[1], chroma[2])), 4),
             "h": round(float(np.degrees(np.arctan2(chroma[2], chroma[1]))) % 360, 1)}}
+        SUBJECTS.write_text(json.dumps(subjects, indent=2, ensure_ascii=False))
         l_mean = l_sum / l_n
         title = titles.get(d.name, d.name)
         p = pal.get(d.name, {})
@@ -224,6 +247,7 @@ def main():
             f'bg {hexof(bg)} · accent {acc} · area {hexof(area)} · '
             f'chroma {chroma_hex or "none"} · L_mean {l_mean:.3f} · '
             f'{used}/{len(covers)} frames</span></div>{imgs}</div>')
+        outer.refresh()
 
     OUT.write_text(
         '<!doctype html><meta charset="utf-8"><title>cinehue subject experiment</title>'
@@ -237,7 +261,9 @@ def main():
         'by the coverage guard (&lt;2% or &gt;90%)</div>'
         + "".join(rows) + "</body>")
     SUBJECTS.write_text(json.dumps(subjects, indent=2, ensure_ascii=False))
-    print(f"[done] -> {OUT.name}, {SUBJECTS.name}")
+    print(f"[done] {len(rows)} computed, {skipped} skipped (already in "
+          f"{SUBJECTS.name}; --redo or delete an entry to recompute) "
+          f"-> {OUT.name}, {SUBJECTS.name}")
 
 
 if __name__ == "__main__":

@@ -48,6 +48,10 @@ def srgb_to_linear(c):
 
 
 def linear_to_srgb(c):
+    # out-of-gamut OKLab colors land slightly outside [0,1]; clip first so
+    # np.power never sees negatives (the NaN lane was discarded by np.where,
+    # but numpy still warned)
+    c = np.clip(c, 0.0, 1.0)
     return np.where(c <= 0.0031308, 12.92 * c, 1.055 * np.power(c, 1 / 2.4) - 0.055)
 
 
@@ -95,7 +99,8 @@ def frame_saliency(im):
 
 def load_pixels(frame_dir, max_px, rng):
     px, sal = [], []
-    for f in sorted(frame_dir.glob("*.jpg")):
+    for f in tqdm(sorted(frame_dir.glob("*.jpg")), desc=frame_dir.name,
+                  unit="frame", position=1, leave=False):
         try:
             im = Image.open(f).convert("RGB")
         except Exception:
@@ -216,7 +221,7 @@ def render_html(results):
     for r in results:
         sw = "".join(
             f'<span title="{p["hex"]} w={p["weight"]}" '
-            f'style="display:inline-block;height:38px;width:{max(6, p["weight"]*220):.0f}px;'
+            f'style="flex:{p["weight"]:.4f} 0 0;min-width:4px;height:38px;'
             f'background:{p["hex"]}"></span>' for p in r["palette"])
         cp = r["chroma_pct"]
         sub = r.get("subject")
@@ -240,7 +245,7 @@ def render_html(results):
             f'width:52px;height:38px;border-radius:6px;outline:2px solid #444;'
             f'background:{r["accent"]["hex"]}"></span>'
             f'{sub_sw}'
-            f'<div style="width:220px">{sw}</div>'
+            f'<div style="display:flex;width:220px;flex:none">{sw}</div>'
             f'<b>{r["title"]}</b>'
             f'<span style="color:#888">L={r["L_mean"]} C={r["C_mean"]} · '
             f'accent {r["accent"]["hex"]} (C={r["accent"]["C"]}){sub_cap} · '
@@ -266,6 +271,8 @@ def main():
     ap.add_argument("--saliency-gamma", type=float, default=1.0,
                     help="subject layer: >1 sharpens toward the most salient pixels; "
                          "0 = uniform (subject collapses to the by-area mood color)")
+    ap.add_argument("--redo", action="store_true",
+                    help="recompute films already present in palettes.json")
     args = ap.parse_args()
 
     rng = np.random.default_rng(0)
@@ -275,27 +282,48 @@ def main():
         print(f"no frames found under {FRAMES} — run the scraper first")
         return
 
-    results = []
-    for d in tqdm(dirs, desc="films", unit="film"):
+    # resume: reuse palettes already computed (films whose frame dir is gone
+    # drop out automatically since we only walk existing dirs)
+    prev = {r["slug"]: r for r in json.loads(PALETTES.read_text())} \
+        if PALETTES.exists() else {}
+    slugs = [d.name for d in dirs]
+
+    def save(done_idx, results):
+        pending = [prev[s] for s in slugs[done_idx + 1:] if s in prev]
+        PALETTES.write_text(json.dumps(results + pending, indent=2,
+                                       ensure_ascii=False))
+
+    results, skipped = [], 0
+    outer = tqdm(dirs, desc="films", unit="film", position=0)
+    for i, d in enumerate(outer):
+        if d.name in prev and not args.redo:
+            results.append(prev[d.name])
+            skipped += 1
+            continue
         px, sal = load_pixels(d, args.max_px, rng)
         if px is None:
             tqdm.write(f"[skip] {d.name}: no readable frames")
+            outer.refresh()
             continue
         r = palette_for(px, args.k, args.chroma_gamma, sal, args.saliency_gamma)
         r["slug"] = d.name
         r["title"] = titles.get(d.name, d.name)
+        with_mood([r])
         results.append(r)
+        save(i, results)   # after every film so a crash or ^C loses nothing
         sub = r.get("subject")
         subtxt = f'{sub["hex"]} (C={sub["C"]:.3f})' if sub else "-"
         tqdm.write(f'{r["title"]:24.24} blend {r["blend"]} · '
                    f'accent {r["accent"]["hex"]} (C={r["accent"]["C"]:.3f}) · '
                    f'subject {subtxt}')
+        outer.refresh()
 
-    with_mood(results)
+    with_mood(results)   # refresh every film's mood from current subjects.json
     results.sort(key=lambda r: (r["mood"]["h"], r["L_mean"]))  # around the wheel
     PALETTES.write_text(json.dumps(results, indent=2, ensure_ascii=False))
     render_html(results)
-    print(f"[done] {len(results)} films -> {PALETTES.name}, {PREVIEW.name}")
+    print(f"[done] {len(results) - skipped} computed, {skipped} reused "
+          f"(--redo to recompute) -> {PALETTES.name}, {PREVIEW.name}")
 
 
 if __name__ == "__main__":

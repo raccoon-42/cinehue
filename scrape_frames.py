@@ -15,9 +15,9 @@ themoviedb.org/settings/api in the TMDB_API_KEY env var; without it the
 fallback is skipped.
 
 Usage:
-    uv run scrape_filmgrab.py "Blue Velvet" "Stalker" "Ran"
-    uv run scrape_filmgrab.py watchlist.txt   # one title per line, # = comment
-    uv run scrape_filmgrab.py                 # ./watchlist.txt if present,
+    uv run scrape_frames.py "Blue Velvet" "Stalker" "Ran"
+    uv run scrape_frames.py watchlist.txt   # one title per line, # = comment
+    uv run scrape_frames.py                 # ./watchlist.txt if present,
                                               # else the default sample list
 """
 import json
@@ -38,6 +38,22 @@ FRAMES = ROOT / "data" / "frames"
 MANIFEST = ROOT / "data" / "manifest.json"
 MAX_FRAMES = 20          # frames kept per film
 DELAY = 0.3              # seconds between requests, be polite
+
+
+def load_env():
+    """Minimal .env loader (KEY=value lines); env vars already set win."""
+    envfile = ROOT / ".env"
+    if not envfile.exists():
+        return
+    for line in envfile.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+
+
+load_env()
 TMDB_KEY = os.environ.get("TMDB_API_KEY", "")
 TMDB_IMG = "https://image.tmdb.org/t/p/original"
 
@@ -64,13 +80,22 @@ def slugify(title):
     return re.sub(r"[^a-z0-9]+", "-", t).strip("-")
 
 
-def find_post_url(title):
+def split_year(title):
+    """'A Brighter Summer Day (1991)' -> ('A Brighter Summer Day', '1991').
+    Searching with the parenthetical year returns nothing on either source;
+    stripped out, it instead sharpens the match."""
+    m = re.match(r"^(.*?)\s*\((\d{4})\)\s*$", title)
+    return (m.group(1), m.group(2)) if m else (title, None)
+
+
+def find_post_url(title, year=None):
     """Best-matching post for a title, plus how it matched. Search returns any
     post that merely MENTIONS the title (searching "Stalker" once returned The
-    Green Mile), so prefer an exact slug match, then a slug prefix
-    (year-suffixed posts like solaris-1972), and only then fall back to the
-    first result. Returns (url, match) where match is "exact" | "prefix" |
-    "fallback", or (None, "none")."""
+    Green Mile, "Cars" returned Drive My Car), so ONLY slug matches count:
+    year-suffixed exact first when the year is known, then exact, then a slug
+    prefix (year-suffixed posts like solaris-1972). No slug match = not on
+    FilmGrab; the caller falls through to TMDB. Returns (url, match) where
+    match is "exact" | "prefix", or (None, "none")."""
     q = urllib.parse.urlencode({"s": title})
     html = get(f"https://film-grab.com/?{q}").decode("utf-8", "replace")
     links = re.findall(
@@ -78,15 +103,19 @@ def find_post_url(title):
     if not links:
         return None, "none"
     want = slugify(title)
+    if year:
+        for url, slug in links:
+            if slug == f"{want}-{year}":
+                return url, "exact"
     for url, slug in links:
         if slug == want:
             return url, "exact"
     for url, slug in links:
         if slug.startswith(want + "-"):
             return url, "prefix"
-    tqdm.write(f"[warn] {title}: no slug match, falling back to first result "
-               f"({links[0][1]}) — verify it is the right film")
-    return links[0][0], "fallback"
+    tqdm.write(f"[warn] {title}: search hits but no slug match "
+               f"(first hit: {links[0][1]}) — treating as not on FilmGrab")
+    return None, "none"
 
 
 def find_frames(post_url):
@@ -113,12 +142,17 @@ def tmdb_json(path, **params):
     return json.loads(get(url))
 
 
-def find_frames_tmdb(title):
+def find_frames_tmdb(title, year=None):
     """Fallback source: TMDB backdrops for the top search hit. Returns
     (movie_dict, urls) or (None, []). Prefers textless backdrops."""
     if not TMDB_KEY:
         return None, []
-    results = tmdb_json("/search/movie", query=title).get("results") or []
+    params = {"query": title}
+    if year:
+        params["primary_release_year"] = year
+    results = tmdb_json("/search/movie", **params).get("results") or []
+    if not results and year:   # year mismatch on TMDB's side: retry without
+        results = tmdb_json("/search/movie", query=title).get("results") or []
     if not results:
         return None, []
     movie = results[0]
@@ -179,19 +213,22 @@ def match_report(manifest, titles):
               "before extraction.")
 
 
-def scrape_film(title, manifest):
-    post, match = find_post_url(title)
+def scrape_film(title, manifest, force_tmdb=False):
+    clean, year = split_year(title)
+    # --tmdb: skip FilmGrab — for films it doesn't have, where its search
+    # would return a wrong first-hit fallback (e.g. Cars -> drive-my-car)
+    post, match = (None, None) if force_tmdb else find_post_url(clean, year)
     if post:
         slug = post.rstrip("/").split("/")[-1]
         available = find_frames(post)
     else:
-        movie, available = find_frames_tmdb(title)
+        movie, available = find_frames_tmdb(clean, year)
         if not available:
             hint = "" if TMDB_KEY else " (set TMDB_API_KEY to enable fallback)"
             tqdm.write(f"[skip] {title}: not on FilmGrab or TMDB{hint}")
             manifest[title] = {"found": False}
             return
-        slug = slugify(title)
+        slug = slugify(clean)
         post = f"https://www.themoviedb.org/movie/{movie['id']}"
         match = "tmdb"
         tqdm.write(f"[tmdb] {title}: not on FilmGrab, using TMDB backdrops of "
@@ -217,7 +254,7 @@ def scrape_film(title, manifest):
     tqdm.write(f"[ok] {title}: {len(saved)}/{len(available)} frames -> {slug}/")
 
 
-def main(titles):
+def main(titles, force_tmdb=False):
     manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     for title in tqdm(titles, desc="films", unit="film"):
@@ -225,7 +262,7 @@ def main(titles):
         if prev.get("found") and prev.get("frames"):
             continue  # already scraped; delete its manifest entry to redo
         try:
-            scrape_film(title, manifest)
+            scrape_film(title, manifest, force_tmdb)
         except Exception as e:
             tqdm.write(f"[fail] {title}: {e}")
             manifest[title] = {"found": False, "error": str(e)[:200]}
@@ -246,6 +283,8 @@ def read_watchlist(path):
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    force_tmdb = "--tmdb" in args
+    args = [a for a in args if a != "--tmdb"]
     watchlist = ROOT / "watchlist.txt"
     if len(args) == 1 and args[0].endswith(".txt"):
         titles = read_watchlist(args[0])
@@ -257,4 +296,4 @@ if __name__ == "__main__":
         titles = ["Blue Velvet", "Stalker", "Ran", "The Handmaiden"]
     if not titles:
         sys.exit("watchlist is empty")
-    main(titles)
+    main(titles, force_tmdb)
