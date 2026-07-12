@@ -45,6 +45,24 @@ uv run render/taste_space.py --film "Ran (1985)"
 uv run render/taste_space.py --mode spectrum --bandwidth 6
 ```
 
+## Render modes
+
+All modes draw the same measure on the OKLab hue plane (angle = hue,
+radius = √chroma) and render three squares per run — γ = 0 / 0.5 / 1
+(presence / portrait / measurement). `--film TITLE` works everywhere.
+
+| mode | what it draws |
+|---|---|
+| `atoms` (default) | every atom of the summed measure as its own gaussian, sized by mass^γ; regions emerge from pileup, darkness = unwatched space |
+| `clustered` | the ≤45°-hue swatch quantization (~16 regions) — compressed comparison view |
+| `gradient` | full-bleed mesh: the quantized colors melt across the whole square, weighted by mass^γ; no darkness |
+| `sum` | each film's single-movie rendering stacked on all the others; brightness = how many films agree there |
+| `spectrum` | one smooth 1D gradient: hue width ∝ mass^γ, dark seams = blind spots, gray band = achromatic mass (`--bandwidth` smooths) |
+
+Knobs: `--gamma` (middle square's exponent), `--soft` (kernel size),
+`--sharp` (border crispness), `--knee` (glow threshold — how much pileup
+earns full brightness).
+
 TMDB fallback needs `TMDB_API_KEY` in `.env` (auto-loaded). Frames come from
 FilmGrab stills or TMDB backdrops — never full films.
 
