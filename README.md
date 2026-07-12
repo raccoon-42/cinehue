@@ -47,3 +47,9 @@ uv run render/taste_space.py --mode spectrum --bandwidth 6
 
 TMDB fallback needs `TMDB_API_KEY` in `.env` (auto-loaded). Frames come from
 FilmGrab stills or TMDB backdrops — never full films.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md) — free for personal, research,
+and nonprofit use. **Commercial use is not permitted.**
+Copyright © 2026 Ali Özkaya.
