@@ -25,8 +25,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from tqdm import tqdm
@@ -37,7 +39,52 @@ ROOT = Path(__file__).resolve().parents[1]
 FRAMES = ROOT / "data" / "frames"
 MANIFEST = ROOT / "data" / "manifest.json"
 MAX_FRAMES = 20          # frames kept per film
-DELAY = 0.3              # seconds between requests, be polite
+
+# Politeness: cap requests/sec PER HOST, not with blind fan-out. film-grab.com
+# is a one-person WordPress blog — keep it gentle. TMDB is real infra, hit
+# harder. Threads overlap network latency; the limiter enforces the spacing.
+HOST_RATE = {
+    "film-grab.com": 8.0,        # search + post + frame uploads all share this
+    "api.themoviedb.org": 15.0,
+    "image.tmdb.org": 20.0,
+}
+DEFAULT_RATE = 5.0               # unknown hosts
+FILM_WORKERS = 4                 # films scraped concurrently
+FRAME_WORKERS = 8                # frame downloads concurrent within a film
+
+
+class RateLimiter:
+    """Serialize the *spacing* between requests, not the requests. A thread
+    claims the next time-slot under the lock, releases it, then sleeps until
+    its slot — so curl/network runs unlocked and other threads' slots overlap
+    it. Net effect: steady <=rate req/s with latency hidden."""
+
+    def __init__(self, rate):
+        self.min_interval = 1.0 / rate
+        self.lock = threading.Lock()
+        self.next_time = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            slot = max(now, self.next_time)
+            self.next_time = slot + self.min_interval
+        delay = slot - now
+        if delay > 0:
+            time.sleep(delay)
+
+
+_LIMITERS = {}
+_LIMITERS_LOCK = threading.Lock()
+
+
+def limiter_for(host):
+    with _LIMITERS_LOCK:
+        lim = _LIMITERS.get(host)
+        if lim is None:
+            lim = RateLimiter(HOST_RATE.get(host, DEFAULT_RATE))
+            _LIMITERS[host] = lim
+        return lim
 
 
 def load_env():
@@ -61,7 +108,9 @@ TMDB_IMG = "https://image.tmdb.org/t/p/original"
 def get(url, tries=3):
     # Route through curl: macOS framework Python ships without a CA bundle, so
     # urllib fails SSL verification while the system curl works fine.
+    limiter = limiter_for(urllib.parse.urlsplit(url).netloc)
     for attempt in range(1, tries + 1):
+        limiter.wait()          # per-host pacing (thread-safe)
         r = subprocess.run(["curl", "-sSL", "--max-time", "60", "-A", UA, url],
                            capture_output=True)
         if r.returncode == 0:
@@ -213,7 +262,20 @@ def match_report(manifest, titles):
               "before extraction.")
 
 
-def scrape_film(title, manifest, force_tmdb=False):
+def _download_frame(i, fu, outdir):
+    """Fetch one frame -> outdir/NN.jpg. Returns (i, relpath) or None. Pacing
+    handled by the per-host rate limiter inside get(), so no sleep here."""
+    dest = outdir / f"{i:02d}.jpg"
+    if not dest.exists():
+        try:
+            dest.write_bytes(get(encode(fu)))
+        except Exception as e:
+            tqdm.write(f"  ! {fu}: {e}")
+            return None
+    return i, str(dest.relative_to(ROOT))
+
+
+def scrape_film(title, manifest, lock, force_tmdb=False):
     clean, year = split_year(title)
     # --tmdb: skip FilmGrab — for films it doesn't have, where its search
     # would return a wrong first-hit fallback (e.g. Cars -> drive-my-car)
@@ -226,7 +288,8 @@ def scrape_film(title, manifest, force_tmdb=False):
         if not available:
             hint = "" if TMDB_KEY else " (set TMDB_API_KEY to enable fallback)"
             tqdm.write(f"[skip] {title}: not on FilmGrab or TMDB{hint}")
-            manifest[title] = {"found": False}
+            with lock:
+                manifest[title] = {"found": False}
             return
         slug = slugify(clean)
         post = f"https://www.themoviedb.org/movie/{movie['id']}"
@@ -237,37 +300,45 @@ def scrape_film(title, manifest, force_tmdb=False):
     chosen = sample(available, MAX_FRAMES)
     outdir = FRAMES / slug
     outdir.mkdir(parents=True, exist_ok=True)
-    saved = []
-    for i, fu in enumerate(tqdm(chosen, desc=title[:24], unit="img", leave=False)):
-        dest = outdir / f"{i:02d}.jpg"
-        if not dest.exists():
-            try:
-                dest.write_bytes(get(encode(fu)))
-                time.sleep(DELAY)
-            except Exception as e:
-                tqdm.write(f"  ! {fu}: {e}")
-                continue
-        saved.append(str(dest.relative_to(ROOT)))
-    manifest[title] = {"found": True, "post": post, "slug": slug,
-                       "match": match, "n_available": len(available),
-                       "frames": saved}
+    # Frames download concurrently; the host limiter still bounds actual req/s.
+    results = {}
+    with ThreadPoolExecutor(max_workers=FRAME_WORKERS) as ex:
+        futs = [ex.submit(_download_frame, i, fu, outdir)
+                for i, fu in enumerate(chosen)]
+        for fut in as_completed(futs):
+            r = fut.result()
+            if r:
+                results[r[0]] = r[1]
+    saved = [results[i] for i in sorted(results)]   # keep sampled order
+    with lock:
+        manifest[title] = {"found": True, "post": post, "slug": slug,
+                           "match": match, "n_available": len(available),
+                           "frames": saved}
     tqdm.write(f"[ok] {title}: {len(saved)}/{len(available)} frames -> {slug}/")
 
 
 def main(titles, force_tmdb=False):
     manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-    for title in tqdm(titles, desc="films", unit="film"):
-        prev = manifest.get(title, {})
-        if prev.get("found") and prev.get("frames"):
-            continue  # already scraped; delete its manifest entry to redo
+    lock = threading.Lock()
+
+    def work(title):
+        if manifest.get(title, {}).get("found") and manifest[title].get("frames"):
+            return  # already scraped; delete its manifest entry to redo
         try:
-            scrape_film(title, manifest, force_tmdb)
+            scrape_film(title, manifest, lock, force_tmdb)
         except Exception as e:
             tqdm.write(f"[fail] {title}: {e}")
-            manifest[title] = {"found": False, "error": str(e)[:200]}
+            with lock:
+                manifest[title] = {"found": False, "error": str(e)[:200]}
         # save after every film so a crash or ^C loses nothing
-        MANIFEST.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+        with lock:
+            MANIFEST.write_text(
+                json.dumps(manifest, indent=2, ensure_ascii=False))
+
+    with ThreadPoolExecutor(max_workers=FILM_WORKERS) as ex:
+        list(tqdm(ex.map(work, titles), total=len(titles),
+                  desc="films", unit="film"))
     tqdm.write(f"[done] {len(titles)} film(s) -> {MANIFEST}")
     match_report(manifest, titles)
 
