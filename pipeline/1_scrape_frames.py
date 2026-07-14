@@ -50,8 +50,8 @@ HOST_RATE = {
     "image.tmdb.org": 20.0,
 }
 DEFAULT_RATE = 5.0               # unknown hosts
-FILM_WORKERS = 3                 # films scraped concurrently
-FRAME_WORKERS = 4                # frame downloads concurrent within a film
+FILM_WORKERS = 4                 # films scraped concurrently
+FRAME_WORKERS = 8                # frame downloads concurrent within a film
 
 
 class RateLimiter:
