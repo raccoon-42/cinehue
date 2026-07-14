@@ -22,6 +22,7 @@ Usage:
 """
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -49,8 +50,8 @@ HOST_RATE = {
     "image.tmdb.org": 20.0,
 }
 DEFAULT_RATE = 5.0               # unknown hosts
-FILM_WORKERS = 4                 # films scraped concurrently
-FRAME_WORKERS = 8                # frame downloads concurrent within a film
+FILM_WORKERS = 3                 # films scraped concurrently
+FRAME_WORKERS = 4                # frame downloads concurrent within a film
 
 
 class RateLimiter:
@@ -102,7 +103,7 @@ def load_env():
 
 load_env()
 TMDB_KEY = os.environ.get("TMDB_API_KEY", "")
-TMDB_IMG = "https://image.tmdb.org/t/p/original"
+TMDB_IMG = "https://image.tmdb.org/t/p/w1280"  # palette/subject work downscales anyway; original-size multi-MB files just time out
 
 
 def get(url, tries=3):
@@ -118,7 +119,8 @@ def get(url, tries=3):
         err = r.stderr.decode("utf-8", "replace")[:200]
         if attempt < tries:
             wait = 10 * attempt
-            tqdm.write(f"[retry {attempt}/{tries - 1}] {url}: {err.strip()} "
+            safe_url = re.sub(r"api_key=[^&]+", "api_key=***", url)
+            tqdm.write(f"[retry {attempt}/{tries - 1}] {safe_url}: {err.strip()} "
                        f"— waiting {wait}s")
             time.sleep(wait)
     raise RuntimeError(err)
@@ -275,7 +277,7 @@ def _download_frame(i, fu, outdir):
     return i, str(dest.relative_to(ROOT))
 
 
-def scrape_film(title, manifest, lock, force_tmdb=False):
+def scrape_film(title, manifest, lock, position, force_tmdb=False):
     clean, year = split_year(title)
     # --tmdb: skip FilmGrab — for films it doesn't have, where its search
     # would return a wrong first-hit fallback (e.g. Cars -> drive-my-car)
@@ -301,12 +303,16 @@ def scrape_film(title, manifest, lock, force_tmdb=False):
     outdir = FRAMES / slug
     outdir.mkdir(parents=True, exist_ok=True)
     # Frames download concurrently; the host limiter still bounds actual req/s.
+    # Each film worker owns a fixed screen row (position) below the films bar.
     results = {}
-    with ThreadPoolExecutor(max_workers=FRAME_WORKERS) as ex:
+    with tqdm(total=len(chosen), desc=title[:24].ljust(24), unit="img",
+              position=position, leave=False) as bar, \
+         ThreadPoolExecutor(max_workers=FRAME_WORKERS) as ex:
         futs = [ex.submit(_download_frame, i, fu, outdir)
                 for i, fu in enumerate(chosen)]
         for fut in as_completed(futs):
             r = fut.result()
+            bar.update(1)
             if r:
                 results[r[0]] = r[1]
     saved = [results[i] for i in sorted(results)]   # keep sampled order
@@ -321,24 +327,35 @@ def main(titles, force_tmdb=False):
     manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     lock = threading.Lock()
+    # Screen rows 1..FILM_WORKERS for per-film bars; row 0 is the films bar.
+    slots = queue.Queue()
+    for i in range(FILM_WORKERS):
+        slots.put(i + 1)
+    films_bar = tqdm(total=len(titles), desc="films", unit="film", position=0)
 
     def work(title):
-        if manifest.get(title, {}).get("found") and manifest[title].get("frames"):
-            return  # already scraped; delete its manifest entry to redo
         try:
-            scrape_film(title, manifest, lock, force_tmdb)
-        except Exception as e:
-            tqdm.write(f"[fail] {title}: {e}")
+            if manifest.get(title, {}).get("found") and manifest[title].get("frames"):
+                return  # already scraped; delete its manifest entry to redo
+            pos = slots.get()
+            try:
+                scrape_film(title, manifest, lock, pos, force_tmdb)
+            except Exception as e:
+                tqdm.write(f"[fail] {title}: {e}")
+                with lock:
+                    manifest[title] = {"found": False, "error": str(e)[:200]}
+            finally:
+                slots.put(pos)
+            # save after every film so a crash or ^C loses nothing
             with lock:
-                manifest[title] = {"found": False, "error": str(e)[:200]}
-        # save after every film so a crash or ^C loses nothing
-        with lock:
-            MANIFEST.write_text(
-                json.dumps(manifest, indent=2, ensure_ascii=False))
+                MANIFEST.write_text(
+                    json.dumps(manifest, indent=2, ensure_ascii=False))
+        finally:
+            films_bar.update(1)
 
     with ThreadPoolExecutor(max_workers=FILM_WORKERS) as ex:
-        list(tqdm(ex.map(work, titles), total=len(titles),
-                  desc="films", unit="film"))
+        list(ex.map(work, titles))
+    films_bar.close()
     tqdm.write(f"[done] {len(titles)} film(s) -> {MANIFEST}")
     match_report(manifest, titles)
 
