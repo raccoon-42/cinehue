@@ -27,6 +27,10 @@ data/         gitignored: frames, json outputs, preview html
 
 ## Run
 
+Each stage reads the previous stage's output and resumes where it left off.
+
+### 0. Titles (optional)
+
 The pipeline starts from a titles file — one `Title (Year)` per line, `#`
 for comments. Bring your own (`watchlist.txt` is the scraper's default), or
 pull it from Letterboxd:
@@ -34,12 +38,44 @@ pull it from Letterboxd:
 ```sh
 # scrape a public profile (curl_cffi impersonates Chrome's TLS fingerprint;
 # Cloudflare may still rate-limit long crawls):
-uv run pipeline/0_letterboxd.py <username> [--watchlist]
+uv run pipeline/0_letterboxd.py <username>
 # reliable fallback: the official export zip from letterboxd.com/user/exportdata
-uv run pipeline/0_letterboxd.py <username> --export <zip> [--watchlist]
+uv run pipeline/0_letterboxd.py <username> --export <zip>
+```
+
+Add `--watchlist` to either command to pull the watchlist instead of
+watched films.
+
+### 1. Frames
+
+Scrapes FilmGrab stills (TMDB backdrops as fallback) into `data/frames/`
+and writes `data/manifest.json`. Ends with a match report — fix any flagged
+films before moving on. Already-scraped films are skipped; delete a film's
+manifest entry to redo it.
+
+```sh
 uv run pipeline/1_scrape_frames.py letterboxd_<username>.txt
+```
+
+### 2. Subjects
+
+U²-Net subject masks per frame -> `data/subjects.json`.
+
+```sh
 uv run pipeline/2_subjects.py                 # resumes; --redo to recompute
+```
+
+### 3. Palettes
+
+OKLab k-means per film -> `data/palettes.json`.
+
+```sh
 uv run pipeline/3_extract_palettes.py         # resumes; --redo to recompute
+```
+
+### 4. Render
+
+```sh
 uv run render/taste_space.py                  # whole collection
 uv run render/taste_space.py --film "Ran (1985)"
 uv run render/taste_space.py --mode spectrum --bandwidth 6
