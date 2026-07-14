@@ -33,8 +33,12 @@ Resume: films already present in subjects.json are skipped (the preview only
 shows newly computed films). Delete a film's entry to redo it, or pass
 --redo to recompute everything. subjects.json is saved after EVERY film.
 
+Frames within a film are processed by a thread pool: onnxruntime's run() is
+thread-safe on a shared session, and PIL/numpy release the GIL, so decode,
+mask, and overlay-encode for the next frames overlap with inference.
+
 Usage:
-    uv run pipeline/2_subjects.py [--redo]
+    uv run pipeline/2_subjects.py [--redo] [--workers N]
 """
 import argparse
 import base64
@@ -42,6 +46,7 @@ import io
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -150,10 +155,37 @@ def roi_overlay(im, mask, height=120):
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def process_frame(f, sess):
+    """Everything per-frame: decode, mask, split pixels, overlay. Returns None
+    for unreadable frames; otherwise a tuple the main loop pools in order."""
+    try:
+        im = Image.open(f).convert("RGB")
+    except Exception:
+        return None
+    im.thumbnail((THUMB, THUMB))
+    mask = u2net_mask(im, sess)
+    rgb = np.asarray(im, dtype=np.float32) / 255.0
+    keep = mask > ALPHA
+    cover = float(keep.mean())
+    L = srgb_to_oklab(rgb)[..., 0]
+    used_frame = MIN_COVER <= cover <= MAX_COVER
+    subj = rgb[keep] if used_frame else None
+    if used_frame:
+        bg = rgb[~keep]
+    elif cover < MIN_COVER:  # subject-less shot: the whole frame is mood
+        bg = rgb.reshape(-1, 3)
+    else:
+        bg = None
+    thumb = (roi_overlay(im, mask), cover, used_frame)
+    return cover, float(L.sum()), L.size, subj, bg, thumb
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--redo", action="store_true",
                     help="recompute films already present in subjects.json")
+    ap.add_argument("--workers", type=int, default=4,
+                    help="frame threads per film (default 4)")
     args = ap.parse_args()
 
     ensure_model()
@@ -175,28 +207,23 @@ def main():
             skipped += 1
             continue
         subj_px, bg_px, thumbs, covers, l_sum, l_n = [], [], [], [], 0.0, 0
-        for f in tqdm(sorted(d.glob("*.jpg")), desc=d.name, unit="frame",
-                      position=1, leave=False):
-            try:
-                im = Image.open(f).convert("RGB")
-            except Exception:
-                tqdm.write(f"[bad frame] {d.name}/{f.name}: unreadable, skipped")
-                continue
-            im.thumbnail((THUMB, THUMB))
-            mask = u2net_mask(im, sess)
-            rgb = np.asarray(im, dtype=np.float32) / 255.0
-            keep = mask > ALPHA
-            cover = float(keep.mean())
-            covers.append(cover)
-            L = srgb_to_oklab(rgb)[..., 0]
-            l_sum += float(L.sum()); l_n += L.size
-            used_frame = MIN_COVER <= cover <= MAX_COVER
-            if used_frame:
-                subj_px.append(rgb[keep])
-                bg_px.append(rgb[~keep])
-            elif cover < MIN_COVER:  # subject-less shot: the whole frame is mood
-                bg_px.append(rgb.reshape(-1, 3))
-            thumbs.append((roi_overlay(im, mask), cover, used_frame))
+        files = sorted(d.glob("*.jpg"))
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            results = tqdm(pool.map(lambda f: process_frame(f, sess), files),
+                           total=len(files), desc=d.name, unit="frame",
+                           position=1, leave=False)
+            for f, r in zip(files, results):
+                if r is None:
+                    tqdm.write(f"[bad frame] {d.name}/{f.name}: unreadable, skipped")
+                    continue
+                cover, ls, ln, subj, bg, thumb = r
+                covers.append(cover)
+                l_sum += ls; l_n += ln
+                if subj is not None:
+                    subj_px.append(subj)
+                if bg is not None:
+                    bg_px.append(bg)
+                thumbs.append(thumb)
         used = len(subj_px)
         if not subj_px:
             tqdm.write(f"[skip] {d.name}: no frame produced a usable mask")

@@ -81,6 +81,9 @@ uv run render/taste_space.py --film "Ran (1985)"
 uv run render/taste_space.py --mode spectrum --bandwidth 6
 ```
 
+Recommended: `--mode gradient` — the full-bleed mesh is the best-looking
+starting point for most collections.
+
 ## Render modes
 
 All modes draw the same measure on the OKLab hue plane (angle = hue,
