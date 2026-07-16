@@ -78,6 +78,32 @@ def swatch(cluster):
             "films": [t for t, _ in top[:8]]}
 
 
+def baseline_bins(films, sigma=15.0):
+    """A collection as a probability distribution over 361 bins — 360 hue
+    degrees (chromatic mass smeared by a wrapped gaussian) + 1 gray bin.
+    Dividing another collection's seed masses by these probabilities renders
+    what it OVER/UNDER-represents relative to this baseline, instead of the
+    shape of cinema itself — which is what any two large collections share.
+    Returns (hue_probs[360], gray_prob)."""
+    dens = [0.0] * 360
+    gray = 0.0
+    span = int(3 * sigma)
+    kern = [math.exp(-(d * d) / (2 * sigma * sigma))
+            for d in range(-span, span + 1)]
+    for f in films:
+        for a in film_atoms(f):
+            if a["gray"]:
+                gray += a["w"]
+                continue
+            h0 = int(a["h"])
+            for i, k in enumerate(kern):
+                dens[(h0 + i - span) % 360] += a["w"] * k
+    tot = sum(dens) + gray
+    if tot <= 0:
+        return [1.0 / 361] * 360, 1.0 / 361
+    return [x / tot for x in dens], gray / tot
+
+
 def build_measure(films):
     """films (palettes.json records) -> quantized swatches with mass shares.
     The uncompressed atoms are film_atoms(); this is the <=45deg-per-swatch

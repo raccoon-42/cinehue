@@ -45,7 +45,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib.measure import build_measure, film_atoms
+from lib.measure import baseline_bins, build_measure, film_atoms
 from lib.oklab import hex_to_oklab, oklab_to_hex
 from lib.paths import DATA, PALETTES
 
@@ -89,7 +89,7 @@ def atom_seeds(films):
                       "L": round(a["L"], 4), "a": round(a["a"], 4),
                       "b": round(a["b"], 4), "share": round(a["wg"], 6),
                       "wf": round(a["w"], 5), "film": a["film"],
-                      "gray": False,
+                      "gray": False, "h": a["h"],
                       "tip": f"{a['film']} — {hexs}, "
                              f"{a['wg'] * 100:.2f}% of taste"})
     if grays:
@@ -115,11 +115,28 @@ def cluster_seeds(swatches):
         seeds.append({"x": round(x, 1), "y": round(y, 1),
                       "L": round(L, 4), "a": round(a, 4), "b": round(b, 4),
                       "share": round(s["share"], 5), "wf": 1.0, "film": None,
-                      "gray": s["h"] is None,
+                      "gray": s["h"] is None, "h": s["h"] or 0.0,
                       "tip": f"{s['hex']} — {s['share'] * 100:.1f}% of "
                              f"taste, {s['n_films']} film(s): "
                              f"{', '.join(s['films'])}{more}"})
     return seeds
+
+
+def divide_baseline(items, base_films):
+    """Reweight shares by 1/p_baseline(bin): hues the baseline is heavy in
+    get pushed down, hues it lacks get boosted (the eps floor caps the boost
+    at ~4x so hues absent from the baseline don't explode). A uniform
+    baseline leaves shares untouched. Renormalizes to sum 1 in place."""
+    dens, gray_p = baseline_bins(base_films)
+    u = 1.0 / 361
+    eps = 0.25 * u
+    for s in items:
+        gray = s.get("gray") or s.get("h") is None
+        p = gray_p if gray else dens[int(s["h"]) % 360]
+        s["share"] *= u / (p + eps)
+    tot = sum(s["share"] for s in items)
+    for s in items:
+        s["share"] = round(s["share"] / tot, 6)
 
 
 def sigma_amp_tables(seeds, gammas, soft, mode):
@@ -554,13 +571,44 @@ def main():
                     help="spectrum mode: hue smoothing in degrees")
     ap.add_argument("--film", help="exact title (fallback: substring) — "
                                    "render one film's space")
+    ap.add_argument("--list", dest="subset",
+                    help=".txt of titles — render only these films")
+    ap.add_argument("--baseline",
+                    help="collection to divide out (palettes-format .json, "
+                         "or .txt of titles resolved against palettes.json) "
+                         "— renders over/under-representation vs this "
+                         "baseline instead of raw mass")
     args = ap.parse_args()
     if args.soft is None:
         args.soft = 0.55 if args.mode == "sum" else 1.0
     if args.knee is None:
         args.knee = 0.05 if args.mode == "sum" else 0.8
 
-    films = json.loads(PALETTES.read_text())
+    all_films = json.loads(PALETTES.read_text())
+
+    def by_titles(path):
+        want = {ln.strip().lower()
+                for ln in Path(path).read_text().splitlines()
+                if ln.strip() and not ln.startswith("#")}
+        got = [f for f in all_films if f["title"].lower() in want]
+        if len(got) < len(want):
+            print(f"note: {len(want) - len(got)} title(s) in {path} "
+                  f"not found in palettes.json")
+        return got
+
+    films = by_titles(args.subset) if args.subset else all_films
+    if not films:
+        raise SystemExit(f"no films from {args.subset} in palettes.json")
+
+    base_films = None
+    if args.baseline:
+        if args.mode == "spectrum":
+            raise SystemExit("--baseline is not supported in spectrum mode")
+        base_films = json.loads(Path(args.baseline).read_text()) \
+            if args.baseline.endswith(".json") else by_titles(args.baseline)
+        if not base_films:
+            raise SystemExit(f"baseline {args.baseline} matched no films")
+
     out = OUT
     if args.film:
         q = args.film.lower()
@@ -572,9 +620,14 @@ def main():
             print(f"note: {args.film!r} matched {len(films)} films: "
                   + ", ".join(f["title"] for f in films))
         title = " + ".join(f["title"] for f in films)
-        out = OUT.with_stem(OUT.stem + "_film")
+        out = out.with_stem(out.stem + "_film")
     else:
         title = f"{len(films)} films"
+    if args.subset:
+        out = out.with_stem(out.stem + "_" + Path(args.subset).stem)
+    if base_films:
+        title += f" ÷ baseline of {len(base_films)}"
+        out = out.with_stem(out.stem + "_vs_" + Path(args.baseline).stem)
 
     if args.mode == "spectrum":
         chrom, gray_mass, gray_l, gray_n = spec_gather(films)
@@ -595,11 +648,15 @@ def main():
     if not swatches:
         raise SystemExit("no identity stops found — run the subject "
                          "experiment and extraction first")
+    if base_films:
+        divide_baseline(swatches, base_films)  # legend + cluster seeds inherit
     if args.mode in ("clustered", "gradient"):
         seeds_ = cluster_seeds(swatches)
         what = f"{len(seeds_)} regions"
     else:
         seeds_ = atom_seeds(films)
+        if base_films:
+            divide_baseline(seeds_, base_films)
         what = f"{len(seeds_)} atoms"
     render(seeds_, swatches, [0.0, args.gamma, 1.0], title, out, args,
            args.mode)

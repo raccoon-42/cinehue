@@ -44,7 +44,9 @@ uv run pipeline/0_letterboxd.py <username> --export <zip>
 ```
 
 Add `--watchlist` to either command to pull the watchlist instead of
-watched films.
+watched films — it writes to its own `watchlist.txt` (watched films go to
+`letterboxd_<username>.txt`), keeping the two collections in dedicated
+files for `--list`/`--baseline` comparisons.
 
 ### 1. Frames
 
@@ -101,6 +103,15 @@ radius = √chroma) and render three squares per run — γ = 0 / 0.5 / 1
 Knobs: `--gamma` (middle square's exponent), `--soft` (kernel size),
 `--sharp` (border crispness), `--knee` (glow threshold — how much pileup
 earns full brightness).
+
+Selecting films: `--list titles.txt` renders only those films.
+`--baseline OTHER` (a palettes-format `.json`, or a titles `.txt`) divides
+that collection's hue distribution out — the map then shows what YOUR
+collection over/under-represents relative to the baseline, instead of the
+raw distribution (which looks near-identical for any two large collections:
+all of cinema shares the same orange/teal-heavy color prior). Output
+filenames encode `--list`/`--baseline`, so comparison runs don't overwrite
+each other.
 
 TMDB fallback needs `TMDB_API_KEY` in `.env` (auto-loaded). Frames come from
 FilmGrab stills or TMDB backdrops — never full films.

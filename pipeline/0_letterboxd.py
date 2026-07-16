@@ -15,11 +15,16 @@ scrape (default): the public profile grid pages, fetched with curl_cffi
     pointer to --export.
 
 --export: the official data export zip from letterboxd.com/user/exportdata —
-    complete, instant, Cloudflare-proof. Reads watched.csv (+ watchlist.csv
+    complete, instant, Cloudflare-proof. Reads watched.csv (or watchlist.csv
     with --watchlist) from the zip.
 
+--watchlist switches the source entirely: only the watchlist is scraped
+(or read from the zip), and the output goes to watchlist.txt so the two
+collections stay in dedicated files for --list/--baseline comparisons.
+
 Usage:
-    uv run pipeline/0_letterboxd.py aliozkaya [--watchlist]
+    uv run pipeline/0_letterboxd.py aliozkaya                 # watched -> letterboxd_<user>.txt
+    uv run pipeline/0_letterboxd.py aliozkaya --watchlist     # watchlist -> watchlist.txt
     uv run pipeline/0_letterboxd.py aliozkaya --export ~/Downloads/letterboxd-*.zip
 """
 import argparse
@@ -111,19 +116,14 @@ def read_export_csv(zf, name):
     return out
 
 
-def from_export(path, want_watchlist):
+def from_export(path, watchlist):
     zf = zipfile.ZipFile(path)
-    watched = read_export_csv(zf, "watched.csv")
-    if watched is None:
-        sys.exit(f"{path}: no watched.csv inside — is this the Letterboxd "
+    name = "watchlist.csv" if watchlist else "watched.csv"
+    titles = read_export_csv(zf, name)
+    if titles is None:
+        sys.exit(f"{path}: no {name} inside — is this the Letterboxd "
                  f"data-export zip?")
-    titles = list(watched)
-    n_watch = 0
-    if want_watchlist:
-        wl = read_export_csv(zf, "watchlist.csv") or []
-        n_watch = len(wl)
-        titles += wl
-    return titles, len(watched), n_watch
+    return titles
 
 
 def main():
@@ -134,24 +134,22 @@ def main():
                                      "(letterboxd.com/user/exportdata) "
                                      "— complete and Cloudflare-proof")
     ap.add_argument("--watchlist", action="store_true",
-                    help="also include the watchlist")
+                    help="only the watchlist, into watchlist.txt "
+                         "(default: watched films)")
     ap.add_argument("--out", default=None,
-                    help="output file (default letterboxd_<user>.txt)")
+                    help="output file (default letterboxd_<user>.txt, "
+                         "or watchlist.txt with --watchlist)")
     args = ap.parse_args()
 
+    section = "watchlist" if args.watchlist else "films"
     out = Path(args.out) if args.out else \
-        ROOT / f"letterboxd_{args.username}.txt"
+        ROOT / ("watchlist.txt" if args.watchlist
+                else f"letterboxd_{args.username}.txt")
 
     if args.export:
-        titles, n_films, n_watch = from_export(args.export, args.watchlist)
+        titles = from_export(args.export, args.watchlist)
     else:
-        titles = scrape_section(args.username, "films")
-        n_films = len(titles)
-        n_watch = 0
-        if args.watchlist:
-            wl = scrape_section(args.username, "watchlist")
-            n_watch = len(wl)
-            titles += wl
+        titles = scrape_section(args.username, section)
     if not titles:
         sys.exit(f"no films found — is letterboxd.com/{args.username} "
                  f"public and spelled right?")
@@ -163,9 +161,9 @@ def main():
             unique.append(t)
 
     src = "export" if args.export else "profile scrape"
+    what = "watchlist" if args.watchlist else "watched"
     lines = [f"# letterboxd.com/{args.username} ({src}) — "
-             f"{n_films} watched"
-             + (f", {n_watch} watchlist" if args.watchlist else "")]
+             f"{len(unique)} {what}"]
     lines += unique
     out.write_text("\n".join(lines) + "\n")
     print(f"{len(unique)} unique titles -> {out}")
